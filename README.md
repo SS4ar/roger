@@ -52,6 +52,13 @@ cd client
 go build -mod=mod -o roger-go .
 ```
 
+Cross-compiled binaries are provided in `dist/` (`linux/amd64`, `linux/arm64`, `darwin/arm64`):
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -C client -ldflags "-s -w" -o dist/roger-go-linux-amd64 .
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -C client -ldflags "-s -w" -o dist/roger-go-linux-arm64 .
+```
+
 ## Generate Templates
 
 Generate server templates with a shared key:
@@ -82,9 +89,35 @@ Start a local SOCKS5 server:
 
 Default listen address is `127.0.0.1:1080`.
 
+## Exec Shell
+
+Besides proxying, the client can run an interactive exec shell over the same tunnel. This is currently supported by the PHP template only:
+
+```bash
+./roger-go -k password -u https://example.com/tunnel.php --shell
+```
+
+Inside the shell:
+
+```text
+ls [path]                 list a remote directory
+cat <path>                print a remote file to stdout
+download <remote> [local] download a remote file (chunked)
+upload <local> [remote]   upload a local file (chunked)
+dns <host[:type]>         resolve a host (A, AAAA, MX, TXT, NS, CNAME, ...)
+exec <command>            run a shell command on the server
+!<command>                shortcut for exec
+help                      show the command list
+exit                      leave the shell
+```
+
+The shell rides the same tunnel using a small asset-cache style stage set. Arguments travel in `PATH`/`DATA`, chunk ranges in `OFFSET`, and results come back in `DATA`/`ERROR` with the exit code in `EXIT`.
+
 ## Features
 
 - Go client with SOCKS5, fixed local forwarding, remote forwarding, and TUN mode.
+- Server-side HMAC-SHA256 request authentication for PHP templates.
+- Interactive exec shell (ls, cat, download, upload, dns, exec) for PHP templates.
 - Server templates for PHP, Go, JavaScript, JSP, JSPX, ASPX, and ASHX.
 - Multiple transport modes: `auto`, `classic`, `half-duplex`, `full-duplex`, `h2`, and `h3`.
 - TCP half-close support with `SHUT_WR` forwarding.
@@ -225,6 +258,12 @@ Roger can require username/password authentication on the local SOCKS5 listener.
 
 This protects only the local SOCKS5 server. It does not apply to fixed local port forwarding, remote forwarding, or TUN mode.
 
+### Server-side Authentication
+
+Every request carries an `SIG` field: an HMAC-SHA256 over the decoded request fields, keyed by a secret derived from the connection key (`HMAC-SHA256(key, "roger-auth-v1")`). Generation embeds the same secret into the template, so the server rejects any request that does not present a valid signature with HTTP 403 before dispatching any command.
+
+This protects a discovered URL from being used without the key: the encoding obfuscation alone is not a secret. The signature is currently verified by the PHP template; the other templates accept and ignore the extra field, so regenerate both the template and use a matching client build after changing the key.
+
 ### TUN Mode
 
 The client can run a TUN interface and forward traffic through Roger using the built-in tun2socks integration.
@@ -263,6 +302,8 @@ Auto tuning can adjust selected runtime values during active sessions:
 ### Template Notes
 
 The Go and JavaScript templates are the best candidates for newer streaming transports. PHP and C# runtime behavior can depend heavily on the web server, buffering, and process model. If a mode is unstable in a specific runtime, use `--mode classic` as the compatibility baseline.
+
+The exec shell (`--shell`) is implemented in the PHP template only for now; the other templates ignore the `EXEC` command and must be updated before `--shell` works against them.
 
 For PHP and Node.js deployments, `--async-connect` can help in environments where connection setup is asynchronous:
 

@@ -18,6 +18,9 @@ connect:
   force_redirect: false
   target: null
   remote: false
+  # Start an interactive exec shell (ls/cat/download/upload/dns/exec) instead of proxying.
+  # PHP templates only for now.
+  shell: false
   tun: null
   tun_cidr: null
   tun_mtu: 1400

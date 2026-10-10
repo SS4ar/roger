@@ -76,6 +76,13 @@ func main() {
 		}
 	}
 
+	if cfg.shell {
+		if err := cl.runShell(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	if cfg.mode == "auto" {
 		cfg.mode = cl.negotiateMode()
 		if cfg.proxy == "" {

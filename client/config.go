@@ -46,6 +46,7 @@ func parseFlags() *config {
 			{[]string{"-p", "--listen-port"}, "listen port", cfg.port},
 			{[]string{"-t", "--target"}, "fixed forwarding target IP:PORT", cfg.target},
 			{[]string{"--remote"}, "use -l/-p as server-side BIND listener and -t as local forwarding target", cfg.remote},
+			{[]string{"--shell"}, "start an interactive exec shell instead of proxying", cfg.shell},
 			{[]string{"--tun"}, "enable TUN mode with this interface name (experimental)", cfg.tunName},
 			{[]string{"--tun-cidr"}, "assign CIDR address to TUN interface (experimental)", cfg.tunCIDR},
 			{[]string{"--tun-mtu"}, "TUN MTU (experimental)", cfg.tunMTU},
@@ -102,6 +103,7 @@ func parseFlags() *config {
 	fs.StringVar(&cfg.target, "t", cfg.target, "fixed forwarding target IP:PORT")
 	fs.StringVar(&cfg.target, "target", cfg.target, "fixed forwarding target IP:PORT")
 	fs.BoolVar(&cfg.remote, "remote", cfg.remote, "use -l/-p as server-side BIND listener and -t as local forwarding target")
+	fs.BoolVar(&cfg.shell, "shell", cfg.shell, "start an interactive exec shell instead of proxying")
 	fs.StringVar(&cfg.tunName, "tun", cfg.tunName, "enable TUN mode with this interface name")
 	fs.StringVar(&cfg.tunCIDR, "tun-cidr", cfg.tunCIDR, "assign CIDR address to TUN interface")
 	fs.IntVar(&cfg.tunMTU, "tun-mtu", cfg.tunMTU, "TUN MTU")
@@ -297,6 +299,20 @@ func parseFlags() *config {
 	if cfg.socksUser != "" && cfg.target != "" {
 		fmt.Fprintln(os.Stderr, "SOCKS5 authentication cannot protect -t/--target port forwarding; remove --socks-user/--socks-hash or do not use -t")
 		os.Exit(2)
+	}
+	if cfg.shell {
+		if cfg.tunName != "" {
+			fmt.Fprintln(os.Stderr, "--shell cannot be used with --tun")
+			os.Exit(2)
+		}
+		if cfg.remote {
+			fmt.Fprintln(os.Stderr, "--shell cannot be used with --remote port forwarding")
+			os.Exit(2)
+		}
+		if cfg.target != "" {
+			fmt.Fprintln(os.Stderr, "--shell cannot be used with -t/--target port forwarding")
+			os.Exit(2)
+		}
 	}
 	if cfg.ntlmAuth != "" {
 		user, password, err := parseNTLMAuth(cfg.ntlmAuth)
@@ -504,6 +520,8 @@ func applyConfigValue(cfg *config, key, value string) {
 		cfg.target = value
 	case "remote":
 		cfg.remote = parseBool(value)
+	case "shell":
+		cfg.shell = parseBool(value)
 	case "tun":
 		cfg.tunName = value
 	case "tun_cidr":

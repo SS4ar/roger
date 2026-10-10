@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -123,6 +126,10 @@ func runGenerate(args []string) error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
+	authMac := hmac.New(sha256.New, []byte(cfg.key))
+	authMac.Write([]byte("roger-auth-v1"))
+	authSecret := hex.EncodeToString(authMac.Sum(nil))
+
 	base64Array := cdc.base64ArrayList()
 	for _, entry := range entries {
 		name := entry.Name()
@@ -150,6 +157,7 @@ func runGenerate(args []string) error {
 			"END_INDEX":            strconv.Itoa(requestTemplateEnd),
 			"BLV_L_OFFSET":         strconv.FormatInt(int64(cdc.blvOffset), 10),
 			"BLVHEAD_LEN":          strconv.Itoa(len(headByName) + 1),
+			"AUTH_SECRET":          authSecret,
 		}
 		for marker, value := range replacements {
 			text = replaceWord(text, marker, value)

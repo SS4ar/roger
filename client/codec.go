@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"compress/zlib"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -42,7 +45,7 @@ func newCodec(key string, cfg *config) (*codec, error) {
 		}
 		mapped = string(chars)
 	}
-	c := &codec{blvOffset: blvOffset, mappedBase64: mapped, cfg: cfg}
+	c := &codec{blvOffset: blvOffset, mappedBase64: mapped, authKey: authKey(key), cfg: cfg}
 	for i := 0; i < 256; i++ {
 		c.enc[i] = byte(i)
 		c.dec[i] = byte(i)
@@ -52,6 +55,41 @@ func newCodec(key string, cfg *config) (*codec, error) {
 		c.dec[mapped[i]] = base[i]
 	}
 	return c, nil
+}
+
+func authKey(key string) []byte {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte("roger-auth-v1"))
+	return mac.Sum(nil)
+}
+
+func (c *codec) canonical(info map[string][]byte) []byte {
+	ids := make([]int, 0, len(info))
+	for name := range info {
+		id, ok := headByName[name]
+		if !ok || id == 0 || id == 11 || id == hAuth || id == 39 {
+			continue
+		}
+		ids = append(ids, int(id))
+	}
+	sort.Ints(ids)
+	out := make([]byte, 0, 64)
+	var lenBuf [4]byte
+	for _, id := range ids {
+		v := info[nameByHead[byte(id)]]
+		out = append(out, byte(id))
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(v)))
+		out = append(out, lenBuf[:]...)
+		out = append(out, v...)
+	}
+	return out
+}
+
+func (c *codec) sign(info map[string][]byte) {
+	delete(info, "SIG")
+	mac := hmac.New(sha256.New, c.authKey)
+	mac.Write(c.canonical(info))
+	info["SIG"] = mac.Sum(nil)
 }
 
 func (c *codec) mapBase64(data []byte) []byte {
@@ -78,18 +116,11 @@ func (c *codec) base64ArrayList() string {
 }
 
 func (c *codec) currentHello() []byte {
-	r := newRogerRand(c.cfg.key)
-	_ = r.getrandbits(31)
-	if c.cfg.key != "debug" {
-		for i := 63; i > 0; i-- {
-			_ = r.randBelow(uint64(i + 1))
-		}
-	}
-	_ = r.randValue("")
-	return []byte("<!-- " + r.randValue("roger/"+version) + " -->")
+	return []byte("<!DOCTYPE html>\n<html>\n<head><meta charset=\"utf-8\"><title>Not Found</title></head>\n<body>\n<h1>Not Found</h1>\n<p>The requested resource could not be found.</p>\n</body>\n</html>")
 }
 
 func (c *codec) encodeBody(info map[string][]byte) string {
+	c.sign(info)
 	raw := c.blvEncode(info, false)
 	enc := []byte(base64.StdEncoding.EncodeToString(raw))
 	for i := range enc {
